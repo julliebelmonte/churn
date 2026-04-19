@@ -1,0 +1,129 @@
+# =============================================================================
+# config.yaml — parâmetros centralizados do projeto de churn
+#
+# POR QUE centralizar configs aqui?
+# Evita "magic numbers" espalhados pelo código. Qualquer ajuste de negócio
+# (ex: mudar janela de 90 para 60 dias) é feito em um único lugar,
+# sem precisar caçar constantes em vários arquivos.
+# =============================================================================
+
+data:
+  raw_path: "data/raw/online_retail_customer_churn.csv"
+  processed_path: "data/processed/"
+
+# -----------------------------------------------------------------------------
+# Janelas temporais
+#
+# DECISÃO DE NEGÓCIO: por que 90 dias de observação?
+#   - Captura pelo menos um ciclo de comportamento mensal completo (3x)
+#   - Curto o suficiente para ser relevante (comportamento de 2 anos atrás
+#     não prediz churn amanhã)
+#   - Padrão da indústria para varejo: 60-90 dias
+#
+# DECISÃO DE NEGÓCIO: por que 30 dias de predição?
+#   - O time de retenção precisa de tempo real para agir (ligar, enviar oferta)
+#   - Janelas muito longas (>60 dias) tornam o sinal mais ruidoso
+#   - Janelas muito curtas (<7 dias) não permitem ação
+# -----------------------------------------------------------------------------
+windows:
+  observation_days: 90    # quantos dias de histórico o modelo "vê"
+  prediction_days: 30     # quantos dias à frente queremos prever o churn
+
+# -----------------------------------------------------------------------------
+# Segmentação comportamental
+#
+# DECISÃO: segmentar por tenure (tempo de cliente) porque:
+#   - Clientes novos (< 2 anos): ainda em fase de onboarding, churn por
+#     expectativas não atendidas. Features mais relevantes: suporte, retornos.
+#   - Clientes médios (2-7 anos): churn por oferta competidora ou mudança
+#     de necessidade. Features: engajamento, ticket médio.
+#   - Clientes maduros (> 7 anos): churn por negligência ou grande ruptura.
+#     Features: recência, satisfação, variação de gasto.
+#
+# DECISÃO: segmentar por nível de engajamento porque:
+#   - Um cliente "low engagement" com churn tem perfil completamente diferente
+#     de um "high engagement" com churn. Misturá-los confunde o modelo.
+# -----------------------------------------------------------------------------
+segmentation:
+  tenure_bins: [0, 2, 7, 999]
+  tenure_labels: ["new", "mid", "mature"]
+
+  # Engajamento definido por quartil de Num_of_Purchases
+  # (em produção, viria de DAU/MAU — aqui usamos proxy disponível)
+  engagement_bins: [0, 25, 74, 999]
+  engagement_labels: ["low", "medium", "high"]
+
+  # Recência: dias desde última compra
+  recency_bins: [0, 60, 180, 364, 999]
+  recency_labels: ["active", "cooling", "dormant", "lost"]
+
+# -----------------------------------------------------------------------------
+# Pré-processamento
+# -----------------------------------------------------------------------------
+preprocessing:
+  # Colunas que não entram no modelo — identificadores, não features
+  cols_to_drop: ["Customer_ID"]
+
+  categorical_cols: ["Gender", "Promotion_Response"]
+  boolean_cols: ["Email_Opt_In"]
+  numeric_cols:
+    - "Age"
+    - "Annual_Income"
+    - "Total_Spend"
+    - "Years_as_Customer"
+    - "Num_of_Purchases"
+    - "Average_Transaction_Amount"
+    - "Num_of_Returns"
+    - "Num_of_Support_Contacts"
+    - "Satisfaction_Score"
+    - "Last_Purchase_Days_Ago"
+
+  target_col: "Target_Churn"
+
+  # Estratégia de split
+  # DECISÃO: usamos split estratificado (não temporal) porque a base é
+  # agregada — não temos timestamps por linha. Em dados reais com série
+  # temporal, o split DEVE ser temporal para evitar data leakage.
+  test_size: 0.2
+  val_size: 0.1
+  random_state: 42
+  stratify: true
+
+# -----------------------------------------------------------------------------
+# Modelagem
+# -----------------------------------------------------------------------------
+model:
+  algorithm: "lightgbm"   # alternativa: "xgboost", "random_forest"
+  calibration: "isotonic" # isotonic > platt para datasets maiores
+
+  # Threshold de classificação
+  # DECISÃO: não usar 0.5 — otimizar pelo custo de negócio.
+  # Custo de FN (não detectar churn): perda do MRR do cliente
+  # Custo de FP (campanha desnecessária): custo do incentivo
+  # Ratio típico FN/FP: 5:1 → threshold mais baixo (~0.35)
+  decision_threshold: 0.35
+
+  lightgbm_params:
+    n_estimators: 500
+    learning_rate: 0.05
+    max_depth: 6
+    num_leaves: 31
+    min_child_samples: 20
+    subsample: 0.8
+    colsample_bytree: 0.8
+    class_weight: "balanced"  # lida com desbalanceamento
+    random_state: 42
+
+# -----------------------------------------------------------------------------
+# Monitoramento (MLOps)
+# -----------------------------------------------------------------------------
+monitoring:
+  # PSI > 0.1: alerta amarelo (investigar)
+  # PSI > 0.2: alerta vermelho (considerar retraining)
+  psi_threshold_warning: 0.1
+  psi_threshold_critical: 0.2
+
+  # Queda de PR-AUC em relação ao baseline do deploy
+  performance_degradation_threshold: 0.05
+
+  retraining_schedule: "weekly"  # frequência de avaliação
