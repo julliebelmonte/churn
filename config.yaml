@@ -1,15 +1,8 @@
-# =============================================================================
-# config.yaml — parâmetros centralizados do projeto de churn
-#
-# POR QUE centralizar configs aqui?
-# Evita "magic numbers" espalhados pelo código. Qualquer ajuste de negócio
-# (ex: mudar janela de 90 para 60 dias) é feito em um único lugar,
-# sem precisar caçar constantes em vários arquivos.
-# =============================================================================
 
 data:
   raw_path: "data/raw/online_retail_customer_churn.csv"
   processed_path: "data/processed/"
+  artifacts_path: "artifacts/"
 
 # -----------------------------------------------------------------------------
 # Janelas temporais
@@ -25,37 +18,27 @@ data:
 #   - Janelas muito longas (>60 dias) tornam o sinal mais ruidoso
 #   - Janelas muito curtas (<7 dias) não permitem ação
 # -----------------------------------------------------------------------------
-windows:
-  observation_days: 90    # quantos dias de histórico o modelo "vê"
-  prediction_days: 30     # quantos dias à frente queremos prever o churn
 
-# -----------------------------------------------------------------------------
-# Segmentação comportamental
-#
-# DECISÃO: segmentar por tenure (tempo de cliente) porque:
-#   - Clientes novos (< 2 anos): ainda em fase de onboarding, churn por
-#     expectativas não atendidas. Features mais relevantes: suporte, retornos.
-#   - Clientes médios (2-7 anos): churn por oferta competidora ou mudança
-#     de necessidade. Features: engajamento, ticket médio.
-#   - Clientes maduros (> 7 anos): churn por negligência ou grande ruptura.
-#     Features: recência, satisfação, variação de gasto.
-#
-# DECISÃO: segmentar por nível de engajamento porque:
-#   - Um cliente "low engagement" com churn tem perfil completamente diferente
-#     de um "high engagement" com churn. Misturá-los confunde o modelo.
+windows:
+  observation_days: 90    
+  prediction_days: 30     
+
+
 # -----------------------------------------------------------------------------
 segmentation:
-  tenure_bins: [0, 2, 7, 999]
-  tenure_labels: ["new", "mid", "mature"]
-
-  # Engajamento definido por quartil de Num_of_Purchases
-  # (em produção, viria de DAU/MAU — aqui usamos proxy disponível)
-  engagement_bins: [0, 25, 74, 999]
-  engagement_labels: ["low", "medium", "high"]
-
-  # Recência: dias desde última compra
-  recency_bins: [0, 60, 180, 364, 999]
-  recency_labels: ["active", "cooling", "dormant", "lost"]
+# CustomerSegmenter._TENURE_BINS e _TENURE_LABELS em segmentation.py
+  tenure_bins:   [0, 2, 5, 10, 999]
+  tenure_labels: ["new", "early", "mature", "veteran"]
+ 
+  # Encoding ordinal dos segmentos — deve espelhar CustomerSegmenter._ENC_MAP
+  tenure_encoding:     {new: 0, early: 1, mature: 2, veteran: 3}
+  recency_encoding:    {active: 0, warm: 1, cold: 2, dormant: 3}
+  engagement_encoding: {low: 0, medium: 1, high: 2, vip: 3}
+ 
+  # Recência e engagement: bins aprendidos por percentil no fit()
+  # Os labels abaixo documentam a semântica — não são usados como bins fixos
+  recency_labels:    ["active", "warm", "cold", "dormant"]
+  engagement_labels: ["low", "medium", "high", "vip"]
 
 # -----------------------------------------------------------------------------
 # Pré-processamento
@@ -80,20 +63,17 @@ preprocessing:
 
   target_col: "Target_Churn"
 
-  # Estratégia de split
-  # DECISÃO: usamos split estratificado (não temporal) porque a base é
-  # agregada — não temos timestamps por linha. Em dados reais com série
-  # temporal, o split DEVE ser temporal para evitar data leakage.
-  test_size: 0.2
-  val_size: 0.1
+  test_size:   0.2    # fração reservada para o bloco temp (val + test)
+  temp_split:  0.5    # fração do temp usada como teste → val=10%, test=10%
   random_state: 42
-  stratify: true
+  stratify: true      # preserva proporção de Target_Churn em todas as partições
 
 # -----------------------------------------------------------------------------
 # Modelagem
 # -----------------------------------------------------------------------------
 model:
   algorithm: "lightgbm"   # alternativa: "xgboost", "random_forest"
+
   calibration: "isotonic" # isotonic > platt para datasets maiores
 
   # Threshold de classificação
@@ -102,28 +82,71 @@ model:
   # Custo de FP (campanha desnecessária): custo do incentivo
   # Ratio típico FN/FP: 5:1 → threshold mais baixo (~0.35)
   decision_threshold: 0.35
+  fbeta_beta: 2.0 
 
   lightgbm_params:
     n_estimators: 500
     learning_rate: 0.05
     max_depth: 6
     num_leaves: 31
-    min_child_samples: 20
+    min_child_samples: 29
     subsample: 0.8
     colsample_bytree: 0.8
-    class_weight: "balanced"  # lida com desbalanceamento
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+    scale_pos_weight: 5
     random_state: 42
+
+
+# -----------------------------------------------------------------------------
+# Inferência
+# -----------------------------------------------------------------------------
+inference:
+  # Tiers de risco para o CRM — thresholds do schemas._score_to_tier()
+  # Alterar aqui requer alterar também a função em inference/schemas.py
+  risk_tiers:
+    high:   0.65   # score >= 0.65 → acionar imediatamente
+    medium: 0.35   # score >= 0.35 → fila de retenção
+    low:    0.0    # score < 0.35 → monitorar
+ 
+  # Capacidade operacional do time de retenção
+  # Usado pelo Evaluator.captured_churn_rate() e PerformanceTracker._ccr()
+  # Significa: "o CRM consegue acionar no máximo X% da base por ciclo"
+  crm_capacity_pct: 0.20
 
 # -----------------------------------------------------------------------------
 # Monitoramento (MLOps)
 # -----------------------------------------------------------------------------
 monitoring:
-  # PSI > 0.1: alerta amarelo (investigar)
-  # PSI > 0.2: alerta vermelho (considerar retraining)
-  psi_threshold_warning: 0.1
-  psi_threshold_critical: 0.2
-
-  # Queda de PR-AUC em relação ao baseline do deploy
-  performance_degradation_threshold: 0.05
-
-  retraining_schedule: "weekly"  # frequência de avaliação
+  # --- Data drift (KS-test por feature) ---
+  # KS statistic > ks_alert_threshold → feature com drift
+  # Usado por DriftDetector(ks_threshold=...) em monitoring/drift_detector.py
+  ks_alert_threshold: 0.10
+ 
+  # --- Concept drift (PSI no score de saída do modelo) ---
+  # PSI < 0.10 → estável
+  # PSI 0.10–0.20 → mudança moderada, investigar
+  # PSI > 0.20 → instabilidade severa, retreinar
+  # CORREÇÃO: separados em dois campos nomeados explicitamente.
+  #   Versão anterior tinha psi_threshold_warning e psi_threshold_critical
+  #   mas o DriftDetector usa apenas um threshold (PSI_ALERT_THRESHOLD = 0.20).
+  #   Mantidos os dois para o operador ter contexto de investigação vs ação.
+  psi_warning:  0.10   # investigar — sem ação imediata
+  psi_critical: 0.20   # usado como PSI_ALERT_THRESHOLD no DriftDetector
+ 
+  # --- Degradação de performance (quando labels chegam, T+30) ---
+  # Queda absoluta em pp em relação ao baseline do deploy.
+  # Usado por PerformanceTracker._check_alerts() em monitoring/performance_tracker.py
+  # CORREÇÃO: adicionados os três campos que o tracker realmente verifica.
+  #   Versão anterior tinha só performance_degradation_threshold (genérico),
+  #   mas o tracker verifica roc_auc, pr_auc e ccr separadamente.
+  roc_auc_drop_alert:  0.05   # queda > 5 pp no ROC-AUC
+  pr_auc_drop_alert:   0.05   # queda > 5 pp no PR-AUC
+  ccr_drop_alert:      0.08   # queda > 8 pp no CCR — métrica principal de negócio
+ 
+  # --- CCR drop para concept drift (sem labels disponíveis) ---
+  # Quando o CCR real está disponível, o DriftDetector combina PSI + CCR drop.
+  ccr_drop_threshold: 0.08
+ 
+  # --- Frequência de retreino ---
+  retraining_schedule: "weekly"

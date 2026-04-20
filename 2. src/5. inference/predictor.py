@@ -227,3 +227,13 @@ class ChurnPredictor:
         df = self.pipeline.segmenter.transform(df)
         df = self.pipeline.feature_engineer.transform(df)
         return df
+    
+class Predictor:
+    def __init__(self):
+        self.model = joblib.load("model/trainer.pkl")
+
+    def predict(self, X):
+        return self.model.predict(X)
+
+    def predict_proba(self, X):
+        return self.model.predict_proba(X)[:, 1]
