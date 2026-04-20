@@ -6,8 +6,6 @@ Pipeline completo de machine learning para predição de probabilidade de churn 
 
 ## Resultados
  
-## Resultados
-
 | Métrica | Valor |
 |---|---|
 | ROC-AUC | **0.581** |
@@ -44,7 +42,7 @@ Clientes diferentes cancelam por motivos diferentes. O pipeline cria 3 segmentos
 
 | Segmento | Critério | Insight de Negócio |
 |---|---|---|
-| `segment_tenure` | Tempo como cliente (new / early / mature / veteran) | Clientes novos cancela por expectativa frustrada; veteranos por inércia quebrada |
+| `segment_tenure` | Tempo como cliente (new / early / mature / veteran) | Clientes novos cancelam por expectativa frustrada; veteranos por inércia quebrada |
 | `segment_recency` | Dias desde última compra (active / warm / cold / dormant) | Recência é o sinal mais forte de abandono iminente |
 | `segment_engagement` | Volume de compras (low / medium / high / vip) | Clientes VIP que param de comprar são o maior risco de receita |
 
